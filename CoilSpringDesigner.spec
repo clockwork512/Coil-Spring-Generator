@@ -8,6 +8,11 @@ for pkg in ("OCP", "cadquery", "OpenGL"):
     datas += d
     binaries += b
     hiddenimports += h
+# app icon for the window (the .exe icon is set in EXE below)
+datas += [("assets/icon.png", "assets")]
+# readable copies of the source so Developer mode can show the code behind each value
+import glob
+datas += [(p, "coilspring") for p in glob.glob("coilspring/*.py")]
 # pyqtgraph: skip its examples/jupyter modules (importing them during analysis crashes)
 datas += collect_data_files("pyqtgraph")
 hiddenimports += collect_submodules(
@@ -27,6 +32,7 @@ exe = EXE(
     pyz, a.scripts, [],
     exclude_binaries=True,
     name="CoilSpringDesigner",
+    icon="assets/icon.ico",
     console=False,
 )
 coll = COLLECT(exe, a.binaries, a.datas, name="CoilSpringDesigner")

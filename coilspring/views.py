@@ -10,12 +10,8 @@ from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout
 
 from .calc import SpringInput, SpringResult
 from .geometry import tube_mesh, centerline
-
-ACCENT = QColor("#d98a2b")
-WIRE = QColor("#9fb4c7")
-INK = QColor("#cfd6dd")
-DIM = QColor("#7c8a97")
-BG = QColor("#1b1f24")
+from . import theme
+from .theme import c as tc, T
 
 
 # ---------------------------------------------------------------------------
@@ -41,17 +37,24 @@ class Spring3DView(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self.view = gl.GLViewWidget()
-        self.view.setBackgroundColor(BG)
+        self._last_spring = None
         lay.addWidget(self.view)
         self.mesh = None
         self.plates = []
         self.grid = gl.GLGridItem()
-        self.grid.setColor((255, 255, 255, 25))
         self.view.addItem(self.grid)
         self._last_size = None
+        self.apply_theme()
+
+    def apply_theme(self):
+        self.view.setBackgroundColor(tc("plot_bg"))
+        self.grid.setColor(T["grid"])
+        if self._last_spring is not None:
+            self.update_spring(self._last_spring)
 
     def update_spring(self, s: SpringInput):
         gl = self._gl
+        self._last_spring = s
         verts, faces, normals = tube_mesh(s)
         verts = verts.copy()
         verts[:, 2] -= s.free_length / 2
@@ -63,7 +66,7 @@ class Spring3DView(QWidget):
         fill = np.clip(normals @ L((-0.7, -0.3, 0.2)), 0, None)
         rim = np.clip(normals @ L((0.0, 0.0, 1.0)), 0, None) ** 4
         shade = np.clip(0.28 + 0.62 * key + 0.22 * fill + 0.25 * rim, 0, 1.15)
-        base = np.array([0.66, 0.74, 0.82])
+        base = np.array(T["mesh"])
         cols = np.ones((len(verts), 4), np.float32)
         cols[:, :3] = np.clip(shade[:, None] * base[None, :], 0, 1)
         md = gl.MeshData(vertexes=verts, faces=faces, vertexColors=cols)
@@ -103,6 +106,8 @@ class SpringDrawing(QWidget):
     def paintEvent(self, ev):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
+        BG, WIRE, INK, DIM, ACCENT = (tc("plot_bg"), tc("wire"), tc("ink"), tc("dim"),
+                                      tc("accent"))
         p.fillRect(self.rect(), BG)
         if not self.s or not self.r or not self.r.ok:
             p.setPen(DIM)
@@ -133,7 +138,7 @@ class SpringDrawing(QWidget):
 
         # back half first (y > 0 is "behind"), then front half
         for front in (False, True):
-            col = WIRE if front else WIRE.darker(180)
+            col = WIRE if front else theme.blend(WIRE, BG, 0.55)
             pen = QPen(col, max(lw, 1.0), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
             p.setPen(pen)
             path = QPainterPath()
@@ -151,7 +156,7 @@ class SpringDrawing(QWidget):
             p.drawPath(path)
             if front:
                 # thin highlight
-                p.setPen(QPen(col.lighter(135), max(lw * 0.25, 0.6), Qt.SolidLine, Qt.RoundCap))
+                p.setPen(QPen(col.lighter(135 if theme.is_dark() else 150), max(lw * 0.25, 0.6), Qt.SolidLine, Qt.RoundCap))
                 p.drawPath(path.translated(-lw * 0.18, -lw * 0.18))
         if ground:
             p.restore()
@@ -161,7 +166,7 @@ class SpringDrawing(QWidget):
         p.drawLine(QPointF(X(-s.od * 0.75), Y(0)), QPointF(X(s.od * 0.75), Y(0)))
         p.drawLine(QPointF(X(-s.od * 0.75), Y(s.free_length)), QPointF(X(s.od * 0.75), Y(s.free_length)))
         # axis
-        p.setPen(QPen(DIM.darker(130), 1, Qt.DashDotLine))
+        p.setPen(QPen(theme.blend(DIM, BG, 0.35), 1, Qt.DashDotLine))
         p.drawLine(QPointF(cx, Y(-s.free_length * 0.05)), QPointF(cx, Y(s.free_length * 1.05)))
 
         # dimensions
@@ -230,19 +235,29 @@ class LoadChart(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         pg.setConfigOptions(antialias=True)
-        self.plot = pg.PlotWidget(background=BG)
-        self.plot.showGrid(x=True, y=True, alpha=0.15)
+        self.plot = pg.PlotWidget()
         self.plot.invertX(True)
         lay.addWidget(self.plot)
-        self.curve = self.plot.plot(pen=pg.mkPen(WIRE, width=2.5))
-        self.allow_line = pg.InfiniteLine(angle=0, pen=pg.mkPen(ACCENT, width=1, style=Qt.DashLine),
-                                          label="allowable", labelOpts=dict(color=ACCENT, position=0.9))
+        self.curve = self.plot.plot()
+        self.allow_line = pg.InfiniteLine(angle=0, label="allowable",
+                                          labelOpts=dict(position=0.9))
         self.plot.addItem(self.allow_line)
-        self.solid_line = pg.InfiniteLine(angle=90, pen=pg.mkPen(DIM, width=1, style=Qt.DashLine),
-                                          label="solid", labelOpts=dict(color=DIM, position=0.5, anchors=[(0, 0.5), (0, 0.5)]))
+        self.solid_line = pg.InfiniteLine(angle=90, label="solid",
+                                          labelOpts=dict(position=0.5, anchors=[(1, 0.5), (1, 0.5)]))
         self.plot.addItem(self.solid_line)
-        self.work = pg.ScatterPlotItem(size=10, brush=pg.mkBrush(ACCENT), pen=None)
+        self.work = pg.ScatterPlotItem(size=10, pen=None)
         self.plot.addItem(self.work)
+        self.apply_theme()
+
+    def apply_theme(self):
+        pg = self.pg
+        theme.style_plot(self.plot)
+        self.curve.setPen(pg.mkPen(tc("wire"), width=2.5))
+        self.allow_line.setPen(pg.mkPen(tc("accent"), width=1, style=Qt.DashLine))
+        self.allow_line.label.setColor(tc("accent"))
+        self.solid_line.setPen(pg.mkPen(tc("dim"), width=1, style=Qt.DashLine))
+        self.solid_line.label.setColor(tc("dim"))
+        self.work.setBrush(pg.mkBrush(tc("accent")))
 
     def set_spring(self, s, r, u):
         """u: units helper with .len(), .force(), labels."""

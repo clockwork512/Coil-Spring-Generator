@@ -18,21 +18,16 @@ from PySide6.QtWidgets import (
 
 from .calc import (
     SpringInput, SpringResult, compute, MATERIALS, END_TYPES, MM_PER_IN, N_PER_LBF, MPA_PER_KSI,
-    active_coils_for_rate, wire_d_for_rate,
+    active_coils_for_rate, wire_d_for_rate, wire_chart, DEFAULT_MATERIAL,
 )
 from .views import make_3d_view, SpringDrawing, LoadChart
+from .dev_panel import DevButton, with_dev, Inspector, set_handler, set_buttons_visible
+from . import trace as trace_mod
+from . import theme
+from .theme import span
 
 APP_NAME = "Coil Spring Designer"
 VERSION = "1.0"
-
-WIRE_SIZES_IN = [0.010, 0.012, 0.014, 0.016, 0.018, 0.020, 0.022, 0.024, 0.026, 0.029, 0.031, 0.033,
-                 0.035, 0.037, 0.039, 0.041, 0.043, 0.045, 0.047, 0.049, 0.051, 0.055, 0.059, 0.063,
-                 0.067, 0.071, 0.075, 0.080, 0.085, 0.090, 0.095, 0.100, 0.106, 0.112, 0.118, 0.125,
-                 0.135, 0.148, 0.162, 0.177, 0.192, 0.207, 0.225, 0.250, 0.281, 0.312, 0.375, 0.437, 0.500]
-WIRE_SIZES_MM = [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.63, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2,
-                 1.25, 1.4, 1.5, 1.6, 1.8, 2.0, 2.2, 2.5, 2.8, 3.0, 3.2, 3.5, 3.6, 4.0, 4.5, 5.0, 5.5,
-                 5.6, 6.0, 6.3, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 12.5]
-
 
 # ---------------------------------------------------------------------------
 # Units
@@ -125,6 +120,21 @@ def spin(minimum=0.0, maximum=1e6, decimals=3, step=0.1, suffix=""):
     return w
 
 
+def keep(stored, widget, to_disp, from_disp):
+    """The stored (mm / N) value, unless the person changed what the box shows.
+
+    Boxes show values rounded to their decimals; reading every box back on each edit
+    would replace exact values with rounded ones (e.g. 4.5 mm -> 0.1772 in -> 4.50088 mm).
+    """
+    try:
+        if stored is not None and abs(widget.value() - round(to_disp(stored), widget.decimals())) \
+                < 0.5 * 10 ** -widget.decimals():
+            return stored
+    except (TypeError, ValueError):
+        pass
+    return from_disp(widget.value())
+
+
 class MetricCard(QFrame):
     def __init__(self, title):
         super().__init__()
@@ -134,13 +144,22 @@ class MetricCard(QFrame):
         lay.setSpacing(2)
         self.title = QLabel(title.upper())
         self.title.setObjectName("cardTitle")
+        self.dev = DevButton(None, self)
         self.value = QLabel("—")
         self.value.setObjectName("cardValue")
         self.sub = QLabel("")
         self.sub.setObjectName("cardSub")
-        lay.addWidget(self.title)
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.addWidget(self.title, 1)
+        top.addWidget(self.dev)
+        lay.addLayout(top)
         lay.addWidget(self.value)
         lay.addWidget(self.sub)
+
+    def set_dev(self, key, label=None):
+        """Developer mode: which traced variable the ƒ button on this card opens."""
+        self.dev.set_key(key, label or self.title.text().lower())
 
     def set(self, value, sub="", state=None):
         self.value.setText(value)
@@ -166,6 +185,9 @@ class MainWindow(QMainWindow):
         if system not in (0, 1, 2):   # migrate the old on/off setting
             system = 0 if self.settings.value("imperial", "true") == "true" else 1
         self.u = Units(system)
+        choice = self.settings.value("theme", "Dark")
+        self.theme_choice = choice if choice in THEME_CHOICES else "Dark"
+        theme.set_theme(_system_theme() if self.theme_choice == "Follow system" else self.theme_choice)
         self.s = SpringInput(wire_d=0.080 * MM_PER_IN, mean_d=(0.750 - 0.080) * MM_PER_IN,
                              active_coils=8, free_length=2.0 * MM_PER_IN)
         self.r = SpringResult()
@@ -179,7 +201,11 @@ class MainWindow(QMainWindow):
 
         self.timer = QTimer(self, singleShot=True, interval=60)
         self.timer.timeout.connect(self.recompute)
-        self.recompute()
+        self.apply_theme()
+        try:
+            QGuiApplication.styleHints().colorSchemeChanged.connect(self._on_system_scheme)
+        except Exception:
+            pass
 
     # ---------------- UI construction ----------------
     def _build_ui(self):
@@ -203,7 +229,11 @@ class MainWindow(QMainWindow):
         act("Save…", self.save_design, "Ctrl+S")
         tb.addSeparator()
         act("Copy spec", self.copy_spec, "Ctrl+Shift+C")
+        self.dev_action = act("Developer", self.toggle_developer, "F12")
+        self.dev_action.setCheckable(True)
+        self.dev_action.setToolTip("Developer mode (F12): show how every value is calculated")
         spacer = QWidget()
+        spacer.setObjectName("spacer")
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         tb.addWidget(spacer)
         tb.addWidget(QLabel("Units "))
@@ -212,13 +242,23 @@ class MainWindow(QMainWindow):
         self.units_combo.setCurrentIndex(self.u.system)
         self.units_combo.currentIndexChanged.connect(self.on_units_changed)
         tb.addWidget(self.units_combo)
+        tb.addWidget(QLabel("   Theme "))
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems(THEME_CHOICES)
+        self.theme_combo.setCurrentText(self.theme_choice)
+        self.theme_combo.currentTextChanged.connect(self.on_theme_changed)
+        tb.addWidget(self.theme_combo)
         tb.addSeparator()
         self.stl_action = act("Export STL", lambda: self.export("stl"))
         self.step_action = act("Export STEP", lambda: self.export("step"), "Ctrl+E", primary=True)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(1)
-        self.setCentralWidget(splitter)
+        self.pages = QTabWidget()
+        self.pages.setObjectName("pages")
+        self.pages.setDocumentMode(True)
+        self.pages.addTab(splitter, "Spring design")
+        self.setCentralWidget(self.pages)
 
         # ---- left: inputs ----
         left = QWidget()
@@ -245,7 +285,7 @@ class MainWindow(QMainWindow):
         wrow = QHBoxLayout()
         self.wire_d = spin(0.001, 1000, 4, 0.001)
         self.wire_std = QComboBox()
-        self.wire_std.setToolTip("Standard wire sizes")
+        self.wire_std.setToolTip("Wire sizes in this material's chart (edit the chart in calc.py)")
         self.wire_std.setMaximumWidth(90)
         wrow.addWidget(self.wire_d, 1)
         wrow.addWidget(self.wire_std)
@@ -319,7 +359,7 @@ class MainWindow(QMainWindow):
         brow.addWidget(b1)
         brow.addWidget(b2)
         f.addRow(brow)
-        self.snap = QCheckBox("Snap wire to standard size")
+        self.snap = QCheckBox("Snap wire to a chart size")
         self.snap.setChecked(True)
         f.addRow(self.snap)
         self.solve_info = QLabel()
@@ -384,6 +424,9 @@ class MainWindow(QMainWindow):
         self.card_solid = MetricCard("Solid height")
         self.card_force = MetricCard("Load at solid")
         self.card_stress = MetricCard("Stress at solid")
+        for card, key in ((self.card_k, "k"), (self.card_solid, "Ls"), (self.card_force, "Fs"),
+                          (self.card_stress, "tau_s")):
+            card.set_dev(key)
         cards.addWidget(self.card_k, 0, 0, 1, 2)
         cards.addWidget(self.card_solid, 1, 0)
         cards.addWidget(self.card_force, 1, 1)
@@ -401,7 +444,7 @@ class MainWindow(QMainWindow):
             v = QLabel("—")
             v.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             v.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            self.details.addRow(key, v)
+            self.details.addRow(key, with_dev(v, DETAIL_TRACE_KEYS.get(key), key))
             self.detail_labels[key] = v
         rv.addWidget(g)
 
@@ -411,7 +454,7 @@ class MainWindow(QMainWindow):
         for key in ["Travel", "Length", "Force", "Stress", "% of allowable"]:
             v = QLabel("—")
             v.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            wf.addRow(key, v)
+            wf.addRow(key, with_dev(v, WORK_TRACE_KEYS.get(key), key))
             self.work_labels[key] = v
         rv.addWidget(self.work_box)
         self.work_box.setVisible(False)
@@ -433,6 +476,12 @@ class MainWindow(QMainWindow):
         splitter.addWidget(rscroll)
         splitter.setStretchFactor(1, 1)
 
+        # ---- second page: clamping pressure from springs in parallel ----
+        from .clamp_page import ClampPage
+        self.clamp = ClampPage(self)
+        self.pages.addTab(self.clamp, "Clamping pressure")
+        self._build_inspector()
+
         self.setStatusBar(QStatusBar())
 
         # ---- signals ----
@@ -444,6 +493,7 @@ class MainWindow(QMainWindow):
         self.work_kind.currentIndexChanged.connect(self.on_work_kind)
         self.dia_group.idToggled.connect(self.on_dia_mode)
         self.wire_std.activated.connect(self.on_std_wire)
+        self.material.currentIndexChanged.connect(self._fill_wire_chart)
 
     # ---------------- state <-> widgets ----------------
     def _apply_units_to_widgets(self):
@@ -464,12 +514,23 @@ class MainWindow(QMainWindow):
         self.target_x.setSuffix(f"  {u.len_unit}")
         self.target_x.setDecimals(dec)
         self.target_x.setSingleStep(step * 50)
+        self._fill_wire_chart()
+
+    def _fill_wire_chart(self, *_):
+        """Fill the Std… dropdown with the selected material's chart, in display units."""
+        u = self.u
         self.wire_std.blockSignals(True)
         self.wire_std.clear()
         self.wire_std.addItem("Std…")
-        sizes = WIRE_SIZES_IN if u.imperial else WIRE_SIZES_MM
-        for v in sizes:
-            self.wire_std.addItem(f"{v:.3f}" if u.imperial else f"{v:g}", v)
+        for d_mm, sut in wire_chart(self.material.currentText()):
+            v = u.len(d_mm)
+            label = (f"{v:.4f}".rstrip("0") if u.imperial else f"{v:.3f}".rstrip("0").rstrip("."))
+            if u.imperial and len(label.split(".")[1]) < 3:
+                label = f"{v:.3f}"
+            if sut:
+                label += f"   ({u.fs(sut)})"
+            self.wire_std.addItem(label, d_mm)
+        self.wire_std.view().setMinimumWidth(self.wire_std.view().sizeHintForColumn(0) + 30)
         self.wire_std.blockSignals(False)
 
     def _push_state_to_widgets(self):
@@ -506,18 +567,27 @@ class MainWindow(QMainWindow):
         self.dia_val.blockSignals(False)
 
     def _read_widgets(self):
-        u = self.u
-        d = u.len_in(self.wire_d.value())
-        v = u.len_in(self.dia_val.value())
+        u, old = self.u, self.s
+        d = keep(old.wire_d, self.wire_d, u.len, u.len_in)
         mode = self.dia_group.checkedId()
+        old_dia = [old.od, old.id, old.mean_d][mode]
+        v = keep(old_dia, self.dia_val, u.len, u.len_in)
         mean = v - d if mode == 0 else v + d if mode == 1 else v
+        l0 = keep(old.free_length, self.free_len, u.len, u.len_in)
+        work = None
+        if self.use_work.isChecked():
+            travel_mode = self._work_is_travel()
+            old_pos = None
+            if old.work_length is not None:
+                old_pos = old.free_length - old.work_length if travel_mode else old.work_length
+            pos = keep(old_pos, self.work_len, u.len, u.len_in)
+            work = l0 - pos if travel_mode else pos
         self.s = SpringInput(
             wire_d=d, mean_d=mean, active_coils=self.active.value(),
-            free_length=u.len_in(self.free_len.value()),
+            free_length=l0,
             end_type=self.end_type.currentText(), material=self.material.currentText(),
             right_hand=self.hand.currentIndex() == 0,
-            work_length=self._work_length_from_widget(u.len_in(self.free_len.value()))
-            if self.use_work.isChecked() else None,
+            work_length=work,
         )
 
     # ---------------- slots ----------------
@@ -568,9 +638,9 @@ class MainWindow(QMainWindow):
     def on_std_wire(self, idx):
         if idx <= 0:
             return
-        val = self.wire_std.itemData(idx)
+        d_mm = self.wire_std.itemData(idx)
         self.wire_std.setCurrentIndex(0)
-        self.wire_d.setValue(val)
+        self.wire_d.setValue(self.u.len(d_mm))
 
     def on_units_changed(self, idx):
         self._read_widgets()
@@ -584,6 +654,7 @@ class MainWindow(QMainWindow):
         self.target_k.setValue(self.u.rate(k_target))
         self.target_F.setValue(self.u.force(F_target))
         self.target_x.setValue(self.u.len(x_target))
+        self.clamp.refresh_units()
         self.recompute()
 
     def solve_coils(self):
@@ -615,14 +686,16 @@ class MainWindow(QMainWindow):
                 break
             d = d_new
         exact = d
-        if self.snap.isChecked():
-            sizes = WIRE_SIZES_IN if self.u.imperial else WIRE_SIZES_MM
-            d_disp = min(sizes, key=lambda v: abs(self.u.len_in(v) - exact))
-            d = self.u.len_in(d_disp)
+        chart = [dc for dc, _ in wire_chart(s.material)]
+        snap = self.snap.isChecked() and bool(chart)
+        if snap:
+            d = min(chart, key=lambda dc: abs(dc - exact))
         self.wire_d.setValue(self.u.len(d))
         txt = f"Exact: {self.u.fl(exact)}"
-        if self.snap.isChecked():
-            txt += f" → standard {self.u.fl(d)}"
+        if snap:
+            txt += f" → chart size {self.u.fl(d)}"
+            if exact < chart[0] * 0.98 or exact > chart[-1] * 1.02:
+                txt += " (outside the chart range)"
         self.solve_info.setText(txt + "." + self._after_solve())
 
     # ---------------- design target ----------------
@@ -668,8 +741,8 @@ class MainWindow(QMainWindow):
         self._read_widgets()
         x = self._target_deflection()
         if x is None:
-            self.target_hint.setText("<span style='color:#e5675b'>Compressed length must be "
-                                     "shorter than the free length.</span>")
+            self.target_hint.setText(span("bad", "Compressed length must be "
+                                          "shorter than the free length."))
             return
         u = self.u
         k = u.force_in(self.target_F.value()) / x
@@ -680,8 +753,8 @@ class MainWindow(QMainWindow):
             txt += f"  ·  deflection {u.fl(x)}"
         r = compute(self.s)
         if r.ok and self.s.free_length - x < r.solid_length:
-            txt += ("<br><span style='color:#e3b341'>That position is below the current solid "
-                    f"height ({u.fl(r.solid_length)}).</span>")
+            txt += "<br>" + span("warn", "That position is below the current solid "
+                                 f"height ({u.fl(r.solid_length)}).")
         self.target_hint.setText(txt)
 
     def _after_solve(self):
@@ -729,6 +802,7 @@ class MainWindow(QMainWindow):
             self.warn.setText("<br>".join(f"<b>✕</b> {e}" for e in r.errors))
             self.drawing.set_spring(s, r, u.fl)
             self.chart.set_spring(s, r, u)
+            self.clamp.update_results()
             return
 
         self.card_k.set(u.fr(r.rate), "k = G·d⁴ / (8·D³·Na)")
@@ -750,7 +824,7 @@ class MainWindow(QMainWindow):
         D["Pitch angle"].setText(f"{r.pitch_angle_deg:.2f}°")
         D["Max deflection"].setText(u.fl(r.max_deflection))
         D["Stress correction Kb"].setText(f"{r.bergstrasser:.3f}")
-        D["Wire Sut"].setText(u.fs(r.sut))
+        D["Wire Sut"].setText(u.fs(r.sut) + ("  (chart)" if r.sut_from_chart else ""))
         D["Allowable (solid)"].setText(u.fs(r.allow))
         D["OD at solid"].setText(u.fl(r.od_solid))
         D["L₀ / D"].setText(f"{r.slenderness:.2f}  (limit {r.buckling_limit:.2f})")
@@ -769,10 +843,10 @@ class MainWindow(QMainWindow):
         else:
             self.work_box.setVisible(False)
 
-        msgs = [f"<span style='color:#e5675b'><b>✕</b> {e}</span>" for e in r.errors]
-        msgs += [f"<span style='color:#e3b341'><b>!</b> {w}</span>" for w in r.warnings]
+        msgs = [span("bad", f"<b>✕</b> {e}") for e in r.errors]
+        msgs += [span("warn", f"<b>!</b> {w}") for w in r.warnings]
         if not msgs:
-            msgs = ["<span style='color:#6fbf73'>✓ No design issues found.</span>"]
+            msgs = [span("good", "✓ No design issues found.")]
         self.warn.setText("<br><br>".join(msgs))
 
         self.step_action.setEnabled(r.ok)
@@ -788,6 +862,71 @@ class MainWindow(QMainWindow):
         self.chart.set_spring(s, r, u)
         title = APP_NAME + (f" — {self.current_path}" if self.current_path else "")
         self.setWindowTitle(title)
+        self.clamp.update_results()          # also refreshes the developer inspector
+
+    # ---------------- developer mode ----------------
+    def _build_inspector(self):
+        self.inspector = Inspector(self)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.inspector)
+        self.inspector.hide()
+        set_handler(self.show_variable)
+        self.inspector.visibilityChanged.connect(lambda on: on and self.refresh_dev())
+        on = self.settings.value("developer", "false") == "true"
+        self.dev_action.setChecked(on)
+        self.toggle_developer(on)
+
+    def toggle_developer(self, on=None):
+        if on is None or isinstance(on, bool) is False:
+            on = self.dev_action.isChecked()
+        self.dev_action.setChecked(on)
+        self.settings.setValue("developer", "true" if on else "false")
+        set_buttons_visible(on)
+        self.inspector.setVisible(on)
+        if on:
+            self.refresh_dev()
+
+    def show_variable(self, key):
+        if not self.inspector.isVisible():
+            self.inspector.show()
+        self.refresh_dev()
+        self.inspector.show_var(key)
+
+    def refresh_dev(self):
+        if not getattr(self, "inspector", None) or not self.inspector.isVisible():
+            return
+        try:
+            t = trace_mod.trace_spring(self.s, self.r, self.dia_group.checkedId())
+            cp = self.clamp
+            if cp.r is not None:
+                sres = self.r if cp.source == 0 else None
+                trace_mod.trace_clamp(t, cp.c, cp.r, cp.source == 0, self.s if sres else None, sres)
+        except Exception as e:                      # never let the inspector break the app
+            self.statusBar().showMessage(f"Developer trace error: {e}", 8000)
+            return
+        self.inspector.refresh(t)
+
+    # ---------------- theme ----------------
+    def on_theme_changed(self, choice):
+        self.theme_choice = choice
+        self.settings.setValue("theme", choice)
+        self.apply_theme()
+
+    def _on_system_scheme(self, *_):
+        if self.theme_choice == "Follow system":
+            self.apply_theme()
+
+    def apply_theme(self):
+        name = _system_theme() if self.theme_choice == "Follow system" else self.theme_choice
+        theme.set_theme(name)
+        app = QApplication.instance()
+        app.setPalette(theme.qpalette())
+        app.setStyleSheet(theme.stylesheet())
+        if self.view3d is not None:
+            self.view3d.apply_theme()
+        self.chart.apply_theme()
+        self.clamp.apply_theme()
+        self.drawing.update()
+        self.recompute()
 
     # ---------------- files ----------------
     def new_design(self):
@@ -803,7 +942,8 @@ class MainWindow(QMainWindow):
                                               "Spring design (*.spring.json *.json)")
         if not path:
             return
-        data = {"app": APP_NAME, "version": VERSION, "units_mm_N": True, "spring": self.s.to_dict()}
+        data = {"app": APP_NAME, "version": VERSION, "units_mm_N": True, "spring": self.s.to_dict(),
+                "clamp": self.clamp.get_state()}
         with open(path, "w") as f:
             json.dump(data, f, indent=2)
         self.current_path = path
@@ -822,8 +962,14 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, APP_NAME, f"Could not open file:\n{e}")
             return
+        if self.s.material not in MATERIALS:
+            QMessageBox.information(self, APP_NAME, f"Material \"{self.s.material}\" is no longer in the "
+                                    f"list; using {DEFAULT_MATERIAL} instead.")
+            self.s.material = DEFAULT_MATERIAL
         self.current_path = path
         self._push_state_to_widgets()
+        if "clamp" in data:
+            self.clamp.set_state(data["clamp"])
         self.recompute()
 
     def _default_name(self, ext):
@@ -885,47 +1031,38 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Specification copied to clipboard", 4000)
 
 
-STYLE = """
-* { font-size: 10pt; }
-QMainWindow, QWidget { background: #14171b; color: #d6dce2; }
-QWidget#panel { background: #14171b; }
-QToolBar { background: #101317; border: none; border-bottom: 1px solid #262b31; padding: 6px 10px; spacing: 6px; }
-QToolBar QToolButton { padding: 6px 12px; border-radius: 6px; color: #d6dce2; }
-QToolBar QToolButton:hover { background: #22272e; }
-QToolBar QToolButton:disabled { color: #59626b; }
-QToolButton#primary { background: #d98a2b; color: #15110b; font-weight: 600; }
-QToolButton#primary:hover { background: #e89a3c; }
-QToolButton#primary:disabled { background: #3a3128; color: #7b6d5c; }
-QGroupBox { border: 1px solid #262b31; border-radius: 8px; margin-top: 14px; padding: 12px 10px 10px 10px; font-weight: 600; }
-QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #8f9aa5; }
-QLabel { background: transparent; font-weight: normal; }
-QLabel#hint { color: #7d8893; font-size: 9pt; }
-QLabel#warn { padding: 10px; background: #191d22; border-radius: 8px; }
-QDoubleSpinBox, QComboBox { background: #1d2228; border: 1px solid #2c333b; border-radius: 6px; padding: 5px 8px; min-height: 20px; selection-background-color: #d98a2b; }
-QDoubleSpinBox:focus, QComboBox:focus { border-color: #d98a2b; }
-QDoubleSpinBox:disabled { color: #5c656e; }
-QComboBox QAbstractItemView { background: #1d2228; border: 1px solid #2c333b; selection-background-color: #2f3640; }
-QPushButton { background: #232930; border: 1px solid #323a43; border-radius: 6px; padding: 6px 12px; }
-QPushButton:hover { border-color: #d98a2b; }
-QPushButton:pressed { background: #2c333b; }
-QScrollBar:vertical { background: transparent; width: 8px; margin: 0; }
-QScrollBar::handle:vertical { background: #2c333b; border-radius: 4px; min-height: 30px; }
-QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
-QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
-QTabWidget::pane { border: none; }
-QTabBar::tab { background: transparent; padding: 8px 18px; color: #8f9aa5; border-bottom: 2px solid transparent; }
-QTabBar::tab:selected { color: #e8ecef; border-bottom: 2px solid #d98a2b; }
-QFrame#card { background: #1a1f25; border: 1px solid #262b31; border-radius: 10px; }
-QLabel#cardTitle { color: #7d8893; font-size: 8pt; letter-spacing: 1px; }
-QLabel#cardValue { font-size: 17pt; font-weight: 600; color: #eef1f4; }
-QLabel#cardValue[state="good"] { color: #6fbf73; }
-QLabel#cardValue[state="warn"] { color: #e3b341; }
-QLabel#cardValue[state="bad"] { color: #e5675b; }
-QLabel#cardSub { color: #7d8893; font-size: 8.5pt; }
-QSplitter::handle { background: #262b31; }
-QStatusBar { background: #101317; color: #8f9aa5; }
-QScrollArea { background: #14171b; }
-"""
+THEME_CHOICES = ["Dark", "Light", "Follow system"]
+
+# Developer mode: which traced variable each result row opens (see trace.py)
+DETAIL_TRACE_KEYS = {
+    "OD": "OD", "ID": "ID", "Mean diameter": "D", "Spring index C": "C", "Total coils": "Nt",
+    "Active pitch": "p", "Pitch angle": "lam", "Max deflection": "dmax", "Stress correction Kb": "Kb",
+    "Wire Sut": "Sut", "Allowable (solid)": "Sallow", "OD at solid": "od_s", "L₀ / D": "slender",
+    "Natural freq.": "fn", "Wire length": "Lwire", "Mass": "mass",
+}
+WORK_TRACE_KEYS = {"Travel": "dw", "Length": "Lw", "Force": "Fw", "Stress": "tau_w", "% of allowable": "pct_w"}
+
+
+def _system_theme() -> str:
+    """'Light' or 'Dark' from the operating system setting (Qt 6.5+), else Dark."""
+    try:
+        scheme = QGuiApplication.styleHints().colorScheme()
+        return "Light" if scheme == Qt.ColorScheme.Light else "Dark"
+    except Exception:
+        return "Dark"
+
+
+def STYLE():
+    """Current stylesheet (kept as a function for older scripts that import it)."""
+    return theme.stylesheet()
+
+
+def _icon_path():
+    """assets/icon.png, both when running from source and inside the built app."""
+    import os
+    base = getattr(sys, "_MEIPASS", os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    path = os.path.join(base, "assets", "icon.png")
+    return path if os.path.exists(path) else None
 
 
 def main():
@@ -938,9 +1075,11 @@ def main():
         return
     QApplication.setApplicationName(APP_NAME)
     app = QApplication(sys.argv)
+    icon = _icon_path()
+    if icon:
+        app.setWindowIcon(QIcon(icon))
     app.setStyle("Fusion")
-    app.setStyleSheet(STYLE)
-    w = MainWindow()
+    w = MainWindow()          # applies the saved theme
     w.show()
     sys.exit(app.exec())
 

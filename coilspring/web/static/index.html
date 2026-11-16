@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Coil Spring Designer</title>
+<link rel="icon" type="image/png" href="/static/icon-64.png">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<link rel="stylesheet" href="/static/style.css">
+<script>
+  // apply the saved theme before first paint (no flash)
+  (function () {
+    var c = "Dark";
+    try { c = localStorage.getItem("csd.theme") || "Dark"; } catch (e) {}
+    var dark = c === "Dark" || (c === "Follow system" && matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  })();
+</script>
+</head>
+<body>
+
+<header class="toolbar">
+  <div class="brand"><img src="/static/icon-64.png" alt="" width="26" height="26"><span>Coil Spring Designer</span><span class="ver" title="Website version">v{{VERSION}}</span></div>
+  <div class="tb-group">
+    <button class="tb" id="btn-new" type="button">New</button>
+    <button class="tb" id="btn-open" type="button">Open…</button>
+    <button class="tb" id="btn-save" type="button">Save…</button>
+    <button class="tb" id="btn-copy" type="button">Copy spec</button>
+    <button class="tb" id="btn-dev" type="button" aria-pressed="false" title="Developer mode: show how every value is calculated">Developer</button>
+    <input type="file" id="file-open" accept=".json,application/json" hidden>
+  </div>
+  <div class="tb-spacer"></div>
+  <div class="tb-group">
+    <label class="tb-label" for="units">Units</label>
+    <select id="units">
+      <option value="0">Inch (in, lbf)</option>
+      <option value="1">Metric (mm, N)</option>
+      <option value="2">Metric (mm, kgf)</option>
+    </select>
+    <label class="tb-label" for="theme">Theme</label>
+    <select id="theme">
+      <option>Dark</option><option>Light</option><option>Follow system</option>
+    </select>
+  </div>
+  <div class="tb-group">
+    <button class="tb" id="btn-stl" type="button">Export STL</button>
+    <button class="tb primary" id="btn-step" type="button">Export STEP</button>
+  </div>
+</header>
+
+<nav class="pages" role="tablist">
+  <button role="tab" class="page-tab" data-page="design" aria-selected="true" type="button">Spring design</button>
+  <button role="tab" class="page-tab" data-page="clamp" aria-selected="false" type="button">Clamping pressure</button>
+</nav>
+
+<!-- ======================================================= SPRING DESIGN -->
+<main id="page-design" class="page">
+  <aside class="col inputs">
+    <section class="group">
+      <h2>Material</h2>
+      <select id="material"></select>
+      <p class="hint" id="mat-info"></p>
+    </section>
+
+    <section class="group">
+      <h2>Wire and diameter</h2>
+      <div class="row">
+        <label for="wire_d">Wire Ø</label>
+        <div class="field-pair">
+          <div class="num"><input id="wire_d" type="number" step="any" min="0"><span class="unit" data-u="len"></span></div>
+          <select id="wire-std" title="Wire sizes in this material's chart"><option value="">Std…</option></select>
+        </div>
+      </div>
+      <div class="row">
+        <span class="lbl">Set by</span>
+        <div class="seg" id="dia-mode" role="radiogroup">
+          <label><input type="radio" name="dia-mode" value="od" checked> OD</label>
+          <label><input type="radio" name="dia-mode" value="id"> ID</label>
+          <label><input type="radio" name="dia-mode" value="mean"> Mean</label>
+        </div>
+      </div>
+      <div class="row">
+        <label for="dia" id="dia-label">OD</label>
+        <div class="num"><input id="dia" type="number" step="any" min="0"><span class="unit" data-u="len"></span></div>
+      </div>
+      <p class="hint" id="dia-info"></p>
+    </section>
+
+    <section class="group">
+      <h2>Coils and ends</h2>
+      <div class="row"><label for="end_type">Ends</label><select id="end_type"></select></div>
+      <div class="row">
+        <label for="active">Active coils</label>
+        <div class="num"><input id="active" type="number" step="0.25" min="0.5"></div>
+      </div>
+      <p class="hint" id="total-info"></p>
+      <div class="row">
+        <label for="free_len">Free length</label>
+        <div class="num"><input id="free_len" type="number" step="any" min="0"><span class="unit" data-u="len"></span></div>
+      </div>
+      <div class="row"><label for="hand">Wind</label>
+        <select id="hand"><option value="1">Right hand</option><option value="0">Left hand</option></select></div>
+    </section>
+
+    <section class="group">
+      <h2>Design target</h2>
+      <div class="row"><label for="target-mode">Target by</label>
+        <select id="target-mode"><option value="rate">Spring rate</option><option value="force">Force at a distance</option></select></div>
+      <div class="row" data-target="rate">
+        <label for="target-k">Target rate</label>
+        <div class="num"><input id="target-k" type="number" step="any" min="0"><span class="unit" data-u="rate"></span></div>
+      </div>
+      <div class="row" data-target="force">
+        <label for="target-f">Force</label>
+        <div class="num"><input id="target-f" type="number" step="any" min="0"><span class="unit" data-u="force"></span></div>
+      </div>
+      <div class="row" data-target="force"><label for="target-xkind">Distance as</label>
+        <select id="target-xkind"><option value="deflection">Deflection (travel)</option><option value="length">Compressed length</option></select></div>
+      <div class="row" data-target="force">
+        <label for="target-x">Distance</label>
+        <div class="num"><input id="target-x" type="number" step="any" min="0"><span class="unit" data-u="len"></span></div>
+      </div>
+      <p class="hint" id="target-hint" data-target="force"></p>
+      <div class="btn-row">
+        <button type="button" id="solve-coils" title="Change active coils to hit the target (wire and diameter fixed)">Solve coils</button>
+        <button type="button" id="solve-wire" title="Change wire diameter to hit the target (coils and diameter fixed)">Solve wire Ø</button>
+      </div>
+      <label class="check"><input type="checkbox" id="snap" checked> Snap wire to a chart size</label>
+      <p class="hint" id="solve-info" aria-live="polite"></p>
+    </section>
+
+    <section class="group">
+      <h2>Operating point</h2>
+      <label class="check"><input type="checkbox" id="use-work"> Check force at a position</label>
+      <div class="row"><label for="work-kind">Check by</label>
+        <select id="work-kind"><option value="travel">Travel (compression)</option><option value="length">Working length</option></select></div>
+      <div class="row">
+        <label for="work-val" id="work-label">Travel</label>
+        <div class="num"><input id="work-val" type="number" step="any" min="0"><span class="unit" data-u="len"></span></div>
+      </div>
+    </section>
+  </aside>
+
+  <section class="col views">
+    <div class="view-tabs" role="tablist">
+      <button role="tab" class="view-tab" data-view="3d" aria-selected="true" type="button">3D</button>
+      <button role="tab" class="view-tab" data-view="drawing" aria-selected="false" type="button">Drawing</button>
+      <button role="tab" class="view-tab" data-view="chart" aria-selected="false" type="button">Load chart</button>
+    </div>
+    <div class="view" id="view-3d"><canvas id="c3d"></canvas><p class="view-note">Drag to rotate · scroll to zoom · right-drag to pan</p></div>
+    <div class="view" id="view-drawing" hidden><svg id="drawing" role="img" aria-label="Dimensioned side drawing of the spring"></svg></div>
+    <div class="view" id="view-chart" hidden><svg id="loadchart" role="img" aria-label="Force versus length chart"></svg></div>
+  </section>
+
+  <aside class="col results">
+    <div class="cards">
+      <div class="card wide"><div class="card-t">Spring rate<button class="devbtn" type="button" data-key="k" title="Show how spring rate is calculated">ƒ</button></div><div class="card-v" id="c-rate">—</div><div class="card-s">k = G·d⁴ / (8·D³·Na)</div></div>
+      <div class="card"><div class="card-t">Solid height<button class="devbtn" type="button" data-key="Ls" title="Show how solid height is calculated">ƒ</button></div><div class="card-v" id="c-solid">—</div><div class="card-s" id="c-solid-s"></div></div>
+      <div class="card"><div class="card-t">Load at solid<button class="devbtn" type="button" data-key="Fs" title="Show how load at solid is calculated">ƒ</button></div><div class="card-v" id="c-fsolid">—</div><div class="card-s"></div></div>
+      <div class="card wide"><div class="card-t">Stress at solid<button class="devbtn" type="button" data-key="tau_s" title="Show how stress at solid is calculated">ƒ</button></div><div class="card-v" id="c-stress">—</div><div class="card-s" id="c-stress-s"></div></div>
+    </div>
+    <section class="group">
+      <h2>Details</h2>
+      <dl class="details" id="details"></dl>
+    </section>
+    <section class="group" id="work-box" hidden>
+      <h2>At operating point</h2>
+      <dl class="details" id="work-details"></dl>
+    </section>
+    <div class="messages" id="messages" aria-live="polite"></div>
+  </aside>
+</main>
+
+<!-- ===================================================== CLAMPING PRESSURE -->
+<main id="page-clamp" class="page clamp" hidden>
+  <aside class="col inputs">
+    <section class="group">
+      <h2>Spring</h2>
+      <div class="row"><label for="k-source">Use</label>
+        <select id="k-source"><option value="0">This spring design</option><option value="1">Catalog spring (enter values)</option></select></div>
+      <div class="row" id="k-part-row"><label for="k-part">Part number</label><input id="k-part" type="text" placeholder="optional"></div>
+      <div class="row"><label for="k-rate">Rate (each)</label>
+        <div class="num"><input id="k-rate" type="number" step="any" min="0"><span class="unit" data-u="rate"></span></div></div>
+      <div class="row"><label for="k-free">Free height</label>
+        <div class="num"><input id="k-free" type="number" step="any" min="0"><span class="unit" data-u="len"></span></div></div>
+      <div class="row"><label for="k-solid">Solid height</label>
+        <div class="num"><input id="k-solid" type="number" step="any" min="0"><span class="unit" data-u="len"></span></div></div>
+      <p class="hint" id="k-source-hint"></p>
+    </section>
+
+    <section class="group">
+      <h2>Assembly</h2>
+      <div class="row"><label for="k-n">Number</label>
+        <div class="num"><input id="k-n" type="number" step="1" min="1"><span class="unit">springs</span></div></div>
+      <div class="row"><label for="k-disp">Displacement</label>
+        <div class="num"><input id="k-disp" type="number" step="any" min="0"><span class="unit" data-u="len"></span></div></div>
+      <div class="row"><label for="k-tol">Deflection tol ±</label>
+        <input id="k-tol" type="text" title="± stack-up on the displacement. Type one value, or add up the contributors, e.g. 0.1 + 0.05 + 0.05"></div>
+      <p class="hint" id="k-tol-hint"></p>
+      <div class="row"><label for="k-rtol">Rate tol ±</label>
+        <div class="num"><input id="k-rtol" type="number" step="1" min="0" max="100"><span class="unit">%</span></div></div>
+    </section>
+
+    <section class="group">
+      <h2>Contact area</h2>
+      <div class="row"><label for="k-amode">Set by</label>
+        <select id="k-amode"><option value="0">Enter area</option><option value="1">Length × width</option></select></div>
+      <div class="row" data-amode="0"><label for="k-area">Area</label>
+        <div class="num"><input id="k-area" type="number" step="any" min="0"><span class="unit" data-u="area"></span></div></div>
+      <div class="row" data-amode="1"><label for="k-L">Length</label>
+        <div class="num"><input id="k-L" type="number" step="any" min="0"><span class="unit" data-u="len"></span></div></div>
+      <div class="row" data-amode="1"><label for="k-W">Width</label>
+        <div class="num"><input id="k-W" type="number" step="any" min="0"><span class="unit" data-u="len"></span></div></div>
+      <p class="hint" id="k-area-hint"></p>
+    </section>
+
+    <section class="group">
+      <h2>Tolerance method</h2>
+      <select id="k-method" title="Spreadsheet: band = deflection tol ÷ displacement + rate tol. True worst case: rate×(1 ± tol) × (displacement ± tol), capped at solid."></select>
+    </section>
+    <button type="button" id="k-copy">Copy results</button>
+  </aside>
+
+  <section class="col clamp-results">
+    <div class="cards cards-2">
+      <div class="card"><div class="card-t">Clamping pressure<button class="devbtn" type="button" data-key="c_P" title="Show how clamping pressure is calculated">ƒ</button></div><div class="card-v" id="k-c-p">—</div><div class="card-s" id="k-c-p-s"></div></div>
+      <div class="card"><div class="card-t">Pressure range (tolerance)<button class="devbtn" type="button" data-key="c_Phi" title="Show how the pressure range is calculated">ƒ</button></div><div class="card-v" id="k-c-range">—</div><div class="card-s" id="k-c-range-s"></div></div>
+      <div class="card"><div class="card-t">Total force<button class="devbtn" type="button" data-key="c_F" title="Show how total force is calculated">ƒ</button></div><div class="card-v" id="k-c-force">—</div><div class="card-s" id="k-c-force-s"></div></div>
+      <div class="card"><div class="card-t">Spring compression<button class="devbtn" type="button" data-key="c_pct" title="Show how spring compression is calculated">ƒ</button></div><div class="card-v" id="k-c-travel">—</div><div class="card-s" id="k-c-travel-s"></div></div>
+      <div class="card span2" id="k-c-stress-card"><div class="card-t">Wire stress at high load<button class="devbtn" type="button" data-key="c_tau" title="Show how wire stress at high load is calculated">ƒ</button></div><div class="card-v" id="k-c-stress">—</div><div class="card-s" id="k-c-stress-s"></div></div>
+    </div>
+    <div class="messages" id="k-messages" aria-live="polite"></div>
+    <div class="chart-box"><svg id="k-chart" role="img" aria-label="Clamping pressure versus displacement"></svg></div>
+  </section>
+</main>
+
+<!-- ===================================================== DEVELOPER INSPECTOR -->
+<section class="inspector" id="inspector" hidden aria-label="Developer – calculation inspector">
+  <div class="insp-grip" id="insp-grip" title="Drag to resize"></div>
+  <header class="insp-head">
+    <strong>Developer – calculation inspector</strong>
+    <span class="hint">All math runs in mm, N and MPa on the server, using the same Python code as the desktop app. Click a ƒ next to any value, or pick a variable.</span>
+    <button type="button" class="insp-close" id="insp-close" title="Close the inspector (the ƒ buttons stay)">×</button>
+  </header>
+  <div class="insp-body">
+    <div class="insp-list">
+      <input type="text" id="insp-filter" placeholder="Filter variables…" aria-label="Filter variables">
+      <div class="insp-vars" id="insp-vars" role="listbox"></div>
+    </div>
+    <div class="insp-main">
+      <div class="view-tabs">
+        <button class="view-tab insp-tab" data-itab="var" aria-selected="true" type="button">Variable</button>
+        <button class="view-tab insp-tab" data-itab="log" aria-selected="false" type="button">Calculation log</button>
+      </div>
+      <div class="insp-detail" id="insp-detail"></div>
+      <div class="insp-log" id="insp-logbox" hidden>
+        <pre id="insp-log"></pre>
+        <button type="button" id="insp-copy">Copy log</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="toast" id="toast" role="status" hidden></div>
+
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>
